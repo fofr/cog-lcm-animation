@@ -496,7 +496,7 @@ class LatentConsistencyModelPipeline_controlnet(DiffusionPipeline):
         timesteps = self.scheduler.timesteps
         latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
 
-        print("timesteps: ", timesteps)
+        # print("timesteps: ", timesteps)
 
         # 5. Prepare latent variable
         num_channels_latents = self.unet.config.in_channels
