@@ -199,7 +199,8 @@ class Predictor(BasePredictor):
         """Run a single prediction on the model"""
         # Removing all temporary frames
         tmp_frames = glob.glob("/tmp/out-*.png")
-        for frame in tmp_frames:
+        tmp_control_frames = glob.glob("/tmp/control-*.png")
+        for frame in tmp_frames + tmp_control_frames:
             os.remove(frame)
 
         if seed is None:
