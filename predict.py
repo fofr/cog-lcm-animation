@@ -4,14 +4,19 @@ import subprocess
 import glob
 import tarfile
 from typing import List
-from diffusers import DiffusionPipeline, AutoPipelineForImage2Image
+from diffusers import DiffusionPipeline, ControlNetModel
+from latent_consistency_controlnet import LatentConsistencyModelPipeline_controlnet
 from cog import BasePredictor, Input, Path
 from PIL import Image
+from canny_gpu import SobelOperator as CannyOperator
 
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
+        torch_dtype = torch.float16
+        torch_device = "cuda"
+
         self.txt2img_pipe = DiffusionPipeline.from_pretrained(
             "SimianLuo/LCM_Dreamshaper_v7",
             cache_dir="model_cache",
@@ -19,16 +24,27 @@ class Predictor(BasePredictor):
             local_files_only=True,
         )
 
-        self.txt2img_pipe.to(torch_device="cuda", torch_dtype=torch.float16)
+        self.txt2img_pipe.to(torch_device=torch_device, torch_dtype=torch_dtype)
 
-        self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
+        controlnet_canny = ControlNetModel.from_pretrained(
+            "lllyasviel/control_v11p_sd15_canny",
+            cache_dir="model_cache",
+            local_files_only=True,
+            torch_dtype=torch_dtype,
+        ).to(torch_device)
+
+        self.img2img_pipe = LatentConsistencyModelPipeline_controlnet.from_pretrained(
             "SimianLuo/LCM_Dreamshaper_v7",
             cache_dir="model_cache",
             safety_checker=None,
+            controlnet=controlnet_canny,
             local_files_only=True,
+            scheduler=None,
         )
 
-        self.img2img_pipe.to(torch_device="cuda", torch_dtype=torch.float16)
+        self.img2img_pipe.to(torch_device=torch_device, torch_dtype=torch_dtype)
+
+        self.canny_torch = CannyOperator(device=torch_device)
 
     def images_to_video(self, image_folder_path, output_video_path, fps):
         # Forming the ffmpeg command
@@ -75,6 +91,9 @@ class Predictor(BasePredictor):
             for frame in frame_paths:
                 tar.add(frame)
 
+    def control_image(self, image, canny_low_threshold, canny_high_threshold):
+        return self.canny_torch(image, canny_low_threshold, canny_high_threshold)
+
     def predict(
         self,
         start_prompt: str = Input(
@@ -112,6 +131,30 @@ class Predictor(BasePredictor):
             ge=1,
             le=50,
             default=8,
+        ),
+        use_canny_control_net: bool = Input(
+            description="Use the canny control net to guide animation",
+            default=True,
+        ),
+        controlnet_conditioning_scale: float = Input(
+            description="Controlnet conditioning scale",
+            default=0.8,
+        ),
+        control_guidance_start: float = Input(
+            description="Controlnet start",
+            default=0.0,
+        ),
+        control_guidance_end: float = Input(
+            description="Controlnet end",
+            default=1.0,
+        ),
+        canny_low_threshold: float = Input(
+            description="Canny low threshold",
+            default=0.31,
+        ),
+        canny_high_threshold: float = Input(
+            description="Canny high threshold",
+            default=0.78,
         ),
         zoom_increment: int = Input(
             description="Zoom increment percentage for each frame",
@@ -155,11 +198,16 @@ class Predictor(BasePredictor):
             "num_inference_steps": num_inference_steps,
             "prompt": end_prompt,
             "strength": prompt_strength,
+            "control_guidance_start": control_guidance_start,
+            "control_guidance_end": control_guidance_end,
+            "controlnet_conditioning_scale": controlnet_conditioning_scale,
         }
+
+        input_image = None
 
         if image:
             print("img2img mode")
-            img2img_args["image"] = Image.open(image)
+            input_image = Image.open(image)
         else:
             print("txt2img mode")
             txt2img_args = {
@@ -167,7 +215,12 @@ class Predictor(BasePredictor):
                 "num_inference_steps": 8,  # Always want a good starting image
             }
             result = self.txt2img_pipe(**common_args, **txt2img_args).images
-            img2img_args["image"] = result[0]
+            input_image = result[0]
+
+        img2img_args["image"] = input_image
+        img2img_args["control_image"] = self.control_image(
+            input_image, canny_low_threshold, canny_high_threshold
+        )
 
         last_image_path = None
         frame_paths = []
@@ -176,7 +229,11 @@ class Predictor(BasePredictor):
         for iteration in range(iterations):
             if last_image_path:
                 print(f"img2img iteration {iteration}")
-                img2img_args["image"] = Image.open(last_image_path)
+                last_image = Image.open(last_image_path)
+                img2img_args["image"] = last_image
+                img2img_args["control_image"] = self.control_image(
+                    last_image, canny_low_threshold, canny_high_threshold
+                )
 
                 zoom_increment_mapping = {4: 0.1, 3: 0.05, 2: 0.025, 1: 0.00125}
                 if 1 <= zoom_increment <= 4:
