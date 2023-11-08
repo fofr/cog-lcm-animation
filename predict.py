@@ -4,31 +4,28 @@ import subprocess
 import glob
 import tarfile
 from typing import List
-from diffusers import DiffusionPipeline
-from pipeline import LatentConsistencyModelImg2ImgPipeline
+from diffusers import DiffusionPipeline, AutoPipelineForImage2Image
 from cog import BasePredictor, Input, Path
 from PIL import Image
+
 
 class Predictor(BasePredictor):
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
         self.txt2img_pipe = DiffusionPipeline.from_pretrained(
             "SimianLuo/LCM_Dreamshaper_v7",
-            custom_pipeline="latent_consistency_txt2img",
-            custom_revision="main",
             cache_dir="model_cache",
             safety_checker=None,
-            local_files_only=True
+            local_files_only=True,
         )
 
         self.txt2img_pipe.to(torch_device="cuda", torch_dtype=torch.float16)
 
         self.img2img_pipe = DiffusionPipeline.from_pretrained(
             "SimianLuo/LCM_Dreamshaper_v7",
-            custom_pipeline=".",
             cache_dir="model_cache",
             safety_checker=None,
-            local_files_only=True
+            local_files_only=True,
         )
 
         self.img2img_pipe.to(torch_device="cuda", torch_dtype=torch.float16)
@@ -36,15 +33,21 @@ class Predictor(BasePredictor):
     def images_to_video(self, image_folder_path, output_video_path, fps):
         # Forming the ffmpeg command
         cmd = [
-            'ffmpeg',
-            '-y',  # Overwrite output file if it exists
-            '-framerate', str(fps),  # Set the framerate for the input files
-            '-pattern_type', 'glob',  # Enable pattern matching for filenames
-            '-i', f'{image_folder_path}/out-*.png',  # Input files pattern
-            '-c:v', 'libx264',  # Set the codec for video
-            '-pix_fmt', 'yuv420p',  # Set the pixel format
-            '-crf', '17',  # Set the constant rate factor for quality
-            output_video_path  # Output file
+            "ffmpeg",
+            "-y",  # Overwrite output file if it exists
+            "-framerate",
+            str(fps),  # Set the framerate for the input files
+            "-pattern_type",
+            "glob",  # Enable pattern matching for filenames
+            "-i",
+            f"{image_folder_path}/out-*.png",  # Input files pattern
+            "-c:v",
+            "libx264",  # Set the codec for video
+            "-pix_fmt",
+            "yuv420p",  # Set the pixel format
+            "-crf",
+            "17",  # Set the constant rate factor for quality
+            output_video_path,  # Output file
         ]
 
         # Run the ffmpeg command
@@ -115,7 +118,6 @@ class Predictor(BasePredictor):
             ge=0,
             le=4,
             default=0,
-
         ),
         guidance_scale: float = Input(
             description="Scale for classifier-free guidance", ge=1, le=20, default=8.0
@@ -124,8 +126,9 @@ class Predictor(BasePredictor):
             description="Random seed. Leave blank to randomize the seed", default=None
         ),
         return_frames: bool = Input(
-            description="Return a tar file with all the frames alongside the video", default=False
-        )
+            description="Return a tar file with all the frames alongside the video",
+            default=False,
+        ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
         # Removing all temporary frames
@@ -145,13 +148,13 @@ class Predictor(BasePredictor):
             "guidance_scale": guidance_scale,
             "num_images_per_prompt": 1,
             "lcm_origin_steps": 50,
-            "output_type": "pil"
+            "output_type": "pil",
         }
 
         img2img_args = {
             "num_inference_steps": num_inference_steps,
             "prompt": end_prompt,
-            "strength": prompt_strength
+            "strength": prompt_strength,
         }
 
         if image:
@@ -161,7 +164,7 @@ class Predictor(BasePredictor):
             print("txt2img mode")
             txt2img_args = {
                 "prompt": start_prompt,
-                "num_inference_steps": 8 # Always want a good starting image
+                "num_inference_steps": 8,  # Always want a good starting image
             }
             result = self.txt2img_pipe(**common_args, **txt2img_args).images
             img2img_args["image"] = result[0]
@@ -178,7 +181,9 @@ class Predictor(BasePredictor):
                 zoom_increment_mapping = {4: 0.1, 3: 0.05, 2: 0.025, 1: 0.00125}
                 if 1 <= zoom_increment <= 4:
                     zoom_factor = zoom_increment_mapping[zoom_increment]
-                    img2img_args["image"] = self.zoom_image(img2img_args["image"], zoom_factor)
+                    img2img_args["image"] = self.zoom_image(
+                        img2img_args["image"], zoom_factor
+                    )
 
             # Execute the model pipeline here
             result = self.img2img_pipe(**common_args, **img2img_args).images
@@ -194,7 +199,7 @@ class Predictor(BasePredictor):
 
         # Tar and return all the frames if return_frames is True
         if return_frames:
-            print(f"Tarring and returning all frames")
+            print("Tarring and returning all frames")
             tar_path = "/tmp/frames.tar.gz"
             self.tar_frames(frame_paths, tar_path)
             return [Path(video_path), Path(tar_path)]
