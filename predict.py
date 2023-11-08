@@ -21,7 +21,7 @@ class Predictor(BasePredictor):
 
         self.txt2img_pipe.to(torch_device="cuda", torch_dtype=torch.float16)
 
-        self.img2img_pipe = DiffusionPipeline.from_pretrained(
+        self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
             "SimianLuo/LCM_Dreamshaper_v7",
             cache_dir="model_cache",
             safety_checker=None,
