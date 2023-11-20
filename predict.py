@@ -44,7 +44,9 @@ class Predictor(BasePredictor):
 
         pipe = pipeline_class.from_pretrained("SimianLuo/LCM_Dreamshaper_v7", **kwargs)
         pipe.to(torch_device="cuda", torch_dtype=torch.float16)
-        pipe.enable_xformers_memory_efficient_attention()
+
+        # No noticeable performance increase
+        # pipe.enable_xformers_memory_efficient_attention()
         return pipe
 
     def setup(self) -> None:
@@ -79,7 +81,7 @@ class Predictor(BasePredictor):
             "-pattern_type",
             "glob",  # Enable pattern matching for filenames
             "-i",
-            f"{image_folder_path}/{prefix}-*.jpg",  # Input files pattern
+            f"{image_folder_path}/{prefix}-*.png",  # Input files pattern
             "-c:v",
             "libx264",  # Set the codec for video
             "-pix_fmt",
@@ -119,7 +121,8 @@ class Predictor(BasePredictor):
         canny = cv.Canny(image, canny_low_threshold, canny_high_threshold)
         return Image.fromarray(canny)
 
-    @torch.inference_mode()
+    # No noticeable performance increase
+    # @torch.inference_mode()
     def predict(
         self,
         start_prompt: str = Input(
@@ -221,7 +224,6 @@ class Predictor(BasePredictor):
             seed = int.from_bytes(os.urandom(2), "big")
 
         print(f"Using seed: {seed}")
-        torch.manual_seed(seed)
 
         common_args = {
             "width": width,
@@ -256,7 +258,9 @@ class Predictor(BasePredictor):
                 "num_inference_steps": 8,  # Always want a good starting image
             }
             generating_init_image_start = time.time()
-            result = self.txt2img_pipe(**common_args, **txt2img_args).images
+            result = self.txt2img_pipe(
+                **common_args, **txt2img_args, generator=torch.manual_seed(seed)
+            ).images
             input_image = result[0]
             print(
                 f"Generating initial image took: {time.time() - generating_init_image_start:.2f}s"
@@ -299,17 +303,22 @@ class Predictor(BasePredictor):
             # Execute the model pipeline here
             if use_canny_control_net:
                 result = self.img2img_controlnet_pipe(
-                    **common_args, **img2img_args, **controlnet_args
+                    **common_args,
+                    **img2img_args,
+                    **controlnet_args,
                 ).images
 
-                last_control_image_path = f"/tmp/control-{iteration:06d}.jpg"
+                last_control_image_path = f"/tmp/control-{iteration:06d}.png"
                 control_image.save(last_control_image_path)
                 frame_paths.append(last_control_image_path)
             else:
-                result = self.img2img_pipe(**common_args, **img2img_args).images
+                result = self.img2img_pipe(
+                    **common_args,
+                    **img2img_args,
+                ).images
 
             # Save the resulting image for the next iteration
-            last_image_path = f"/tmp/out-{iteration:06d}.jpg"
+            last_image_path = f"/tmp/out-{iteration:06d}.png"
             result[0].save(last_image_path)
             frame_paths.append(last_image_path)
 
