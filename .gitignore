@@ -1,2 +1,4 @@
 __pycache__
 model_cache
+*.mp4
+*.tar

@@ -1,0 +1,10 @@
+model_cache/
+*.png
+*.jpg
+*.mp4
+.git/
+cog_class_data/
+cog_instance_data/
+model_cache.tar
+lcm-sd15-ds7-canny-qr.tar
+tmp/

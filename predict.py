@@ -4,36 +4,59 @@ import torch
 import subprocess
 import glob
 import tarfile
+import time
 import numpy as np
-from typing import List
+from typing import Optional, List
 from diffusers import DiffusionPipeline, ControlNetModel, AutoPipelineForImage2Image
 from latent_consistency_controlnet import LatentConsistencyModelPipeline_controlnet
 from cog import BasePredictor, Input, Path
 from PIL import Image
 
+MODEL_CACHE_URL = (
+    "https://weights.replicate.delivery/default/fofr-lcm/lcm-sd15-ds7-canny-qr.tar"
+)
+MODEL_CACHE = "model_cache"
+
+
+def download_weights(url, dest):
+    start = time.time()
+    print("downloading url: ", url)
+    print("downloading to: ", dest)
+    subprocess.check_call(["pget", "-x", url, dest], close_fds=False)
+    print("downloading took: ", time.time() - start)
+
+
 class Predictor(BasePredictor):
+    def create_pipeline(
+        self,
+        pipeline_class,
+        controlnet: Optional[ControlNetModel] = None,
+    ):
+        kwargs = {
+            "cache_dir": MODEL_CACHE,
+            "local_files_only": True,
+            "safety_checker": None,
+        }
+
+        if controlnet:
+            kwargs["controlnet"] = controlnet
+            kwargs["scheduler"] = None
+
+        pipe = pipeline_class.from_pretrained("SimianLuo/LCM_Dreamshaper_v7", **kwargs)
+        pipe.to(torch_device="cuda", torch_dtype=torch.float16)
+        pipe.enable_xformers_memory_efficient_attention()
+        return pipe
+
     def setup(self) -> None:
         """Load the model into memory to make running multiple predictions efficient"""
+        if not os.path.exists(MODEL_CACHE):
+            download_weights(MODEL_CACHE_URL, MODEL_CACHE)
+
         torch_dtype = torch.float16
         torch_device = "cuda"
 
-        self.txt2img_pipe = DiffusionPipeline.from_pretrained(
-            "SimianLuo/LCM_Dreamshaper_v7",
-            cache_dir="model_cache",
-            safety_checker=None,
-            local_files_only=True,
-        )
-
-        self.txt2img_pipe.to(torch_device=torch_device, torch_dtype=torch_dtype)
-
-        self.img2img_pipe = AutoPipelineForImage2Image.from_pretrained(
-            "SimianLuo/LCM_Dreamshaper_v7",
-            cache_dir="model_cache",
-            safety_checker=None,
-            local_files_only=True,
-        )
-
-        self.img2img_pipe.to(torch_device="cuda", torch_dtype=torch.float16)
+        self.txt2img_pipe = self.create_pipeline(DiffusionPipeline)
+        self.img2img_pipe = self.create_pipeline(AutoPipelineForImage2Image)
 
         controlnet_canny = ControlNetModel.from_pretrained(
             "lllyasviel/control_v11p_sd15_canny",
@@ -42,19 +65,8 @@ class Predictor(BasePredictor):
             torch_dtype=torch_dtype,
         ).to(torch_device)
 
-        self.img2img_controlnet_pipe = (
-            LatentConsistencyModelPipeline_controlnet.from_pretrained(
-                "SimianLuo/LCM_Dreamshaper_v7",
-                cache_dir="model_cache",
-                safety_checker=None,
-                controlnet=controlnet_canny,
-                local_files_only=True,
-                scheduler=None,
-            )
-        )
-
-        self.img2img_controlnet_pipe.to(
-            torch_device=torch_device, torch_dtype=torch_dtype
+        self.img2img_controlnet_pipe = self.create_pipeline(
+            LatentConsistencyModelPipeline_controlnet, controlnet=controlnet_canny
         )
 
     def images_to_video(self, image_folder_path, output_video_path, fps, prefix="out"):
@@ -67,7 +79,7 @@ class Predictor(BasePredictor):
             "-pattern_type",
             "glob",  # Enable pattern matching for filenames
             "-i",
-            f"{image_folder_path}/{prefix}-*.png",  # Input files pattern
+            f"{image_folder_path}/{prefix}-*.jpg",  # Input files pattern
             "-c:v",
             "libx264",  # Set the codec for video
             "-pix_fmt",
@@ -105,8 +117,9 @@ class Predictor(BasePredictor):
     def control_image(self, image, canny_low_threshold, canny_high_threshold):
         image = np.array(image)
         canny = cv.Canny(image, canny_low_threshold, canny_high_threshold)
-        return  Image.fromarray(canny)
+        return Image.fromarray(canny)
 
+    @torch.inference_mode()
     def predict(
         self,
         start_prompt: str = Input(
@@ -197,9 +210,10 @@ class Predictor(BasePredictor):
         ),
     ) -> List[Path]:
         """Run a single prediction on the model"""
+        prediction_start = time.time()
         # Removing all temporary frames
-        tmp_frames = glob.glob("/tmp/out-*.png")
-        tmp_control_frames = glob.glob("/tmp/control-*.png")
+        tmp_frames = glob.glob("/tmp/out-*.*")
+        tmp_control_frames = glob.glob("/tmp/control-*.*")
         for frame in tmp_frames + tmp_control_frames:
             os.remove(frame)
 
@@ -241,8 +255,12 @@ class Predictor(BasePredictor):
                 "prompt": start_prompt,
                 "num_inference_steps": 8,  # Always want a good starting image
             }
+            generating_init_image_start = time.time()
             result = self.txt2img_pipe(**common_args, **txt2img_args).images
             input_image = result[0]
+            print(
+                f"Generating initial image took: {time.time() - generating_init_image_start:.2f}s"
+            )
 
         img2img_args["image"] = input_image
 
@@ -252,12 +270,12 @@ class Predictor(BasePredictor):
             )
             img2img_args["control_image"] = control_image
 
-
         last_image_path = None
         last_control_image_path = None
         frame_paths = []
 
         # Iteratively applying img2img transformations
+        generating_frames_start = time.time()
         for iteration in range(iterations):
             if last_image_path:
                 print(f"img2img iteration {iteration}")
@@ -284,16 +302,18 @@ class Predictor(BasePredictor):
                     **common_args, **img2img_args, **controlnet_args
                 ).images
 
-                last_control_image_path = f"/tmp/control-{iteration:06d}.png"
+                last_control_image_path = f"/tmp/control-{iteration:06d}.jpg"
                 control_image.save(last_control_image_path)
                 frame_paths.append(last_control_image_path)
             else:
                 result = self.img2img_pipe(**common_args, **img2img_args).images
 
             # Save the resulting image for the next iteration
-            last_image_path = f"/tmp/out-{iteration:06d}.png"
+            last_image_path = f"/tmp/out-{iteration:06d}.jpg"
             result[0].save(last_image_path)
             frame_paths.append(last_image_path)
+
+        print(f"Generating frames took: {time.time() - generating_frames_start:.2f}s")
 
         # Creating an mp4 video from the images
         video_path = "/tmp/output_video.mp4"
@@ -312,4 +332,5 @@ class Predictor(BasePredictor):
             self.tar_frames(frame_paths, tar_path)
             paths.append(Path(tar_path))
 
+        print(f"Prediction took: {time.time() - prediction_start:.2f}s")
         return paths
